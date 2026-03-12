@@ -133,6 +133,13 @@ module VagrantPlugins
             net[:macaddress] = mac_match[1] if mac_match
           end
 
+          # Store net0 MAC for management NIC identification
+          net0_string = updated_config[:net0].to_s
+          env[:ui].detail "net0 string: #{net0_string}"
+          net0_mac_match = net0_string.match(/=([0-9A-Fa-f:]{17})/)
+          env[:ui].detail "net0 MAC match: #{net0_mac_match.inspect}"
+          env[:proxmox_management_mac] = net0_mac_match[1] if net0_mac_match
+
         end
 
       end
@@ -178,59 +185,69 @@ module VagrantPlugins
             # arr_idx + 1 because index 0 is the management NIC (net0).
             networks.each_with_index do |net, arr_idx|
               nic_idx = arr_idx + 1
-              if net[:dhcp]
-                dhcp_script = <<~SHELL
-                  #!/bin/bash
-                  IFACE=$(ls /sys/class/net | grep -v lo | sort | sed -n '#{nic_idx + 1}p')
-                  cat >> /etc/network/interfaces <<EOF
-
-                  allow-hotplug $IFACE
-                  iface $IFACE inet dhcp
-                  EOF
-                  ifup "$IFACE" 2>/dev/null || true
-                SHELL
-                machine.communicate.sudo(dhcp_script)
+              if is_windows
+                unless net[:dhcp]
+                  script = windows_ip_script(nic_idx, net[:ip], net[:netmask], net[:macaddress])
+                  env[:ui].detail "  Configuring Windows NIC #{nic_idx}: #{net[:ip]}"
+                  machine.communicate.sudo(script)
+                end
               else
-                script = linux_ip_script(nic_idx, net[:ip], net[:netmask])
-                env[:ui].detail "  Configuring Linux NIC #{nic_idx}: #{net[:ip]}"
-                machine.communicate.sudo(script)
+                if net[:dhcp]
+                  dhcp_script = <<~SHELL
+        #!/bin/bash
+        IFACE=$(ls /sys/class/net | grep -v lo | sort | sed -n '#{nic_idx + 1}p')
+        cat >> /etc/network/interfaces <<EOF
+
+        allow-hotplug $IFACE
+        iface $IFACE inet dhcp
+        EOF
+        ifup "$IFACE" 2>/dev/null || true
+      SHELL
+                  machine.communicate.sudo(dhcp_script)
+                else
+                  script = linux_ip_script(nic_idx, net[:ip], net[:netmask])
+                  env[:ui].detail "  Configuring Linux NIC #{nic_idx}: #{net[:ip]}"
+                  machine.communicate.sudo(script)
+                end
               end
             end
 
-            # Pre-emptively fix /etc/network/interfaces for after net0 (eth0) removal
-            # Only runs if ethX naming is in use - processes in reverse order to avoid collisions
-            fix_script = <<~SHELL
-                #!/bin/bash
-                # Disable cloud-init network configuration and remove stale files
-                echo "network: {config: disabled}" > /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg
-                rm -f /etc/network/interfaces.d/50-cloud-init
-                rm -f /etc/network/interfaces.d/50-cloud-init.cfg
-
-                # Remove management NIC stanzas (eth0 for Kali, ens3 for Debian)
-                sed -i '/allow-hotplug eth0/d' /etc/network/interfaces
-                sed -i '/iface eth0 inet dhcp/d' /etc/network/interfaces
-                sed -i '/auto eth0/d' /etc/network/interfaces
-                sed -i '/allow-hotplug ens3/d' /etc/network/interfaces
-                sed -i '/iface ens3 inet dhcp/d' /etc/network/interfaces
-                sed -i '/auto ens3/d' /etc/network/interfaces
-
-                # Shift ethN names down by 1 using placeholder (only applies to ethX style naming)
-                if grep -qP 'eth[1-9][0-9]*' /etc/network/interfaces; then
-                  for i in $(grep -oP 'eth\\K[1-9][0-9]*' /etc/network/interfaces | sort -rn | uniq); do
-                    new=$((i - 1))
-                    sed -i "s/eth${i}/ETH_PLACEHOLDER_${new}/g" /etc/network/interfaces
-                  done
-                  sed -i "s/ETH_PLACEHOLDER_/eth/g" /etc/network/interfaces
+          unless is_windows
+                # Pre-emptively fix /etc/network/interfaces for after net0 (eth0) removal
+              # Only runs if ethX naming is in use - processes in reverse order to avoid collisions
+              fix_script = <<~SHELL
+                  #!/bin/bash
+                  # Disable cloud-init network configuration and remove stale files
+                  echo "network: {config: disabled}" > /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg
+                  rm -f /etc/network/interfaces.d/50-cloud-init
+                  rm -f /etc/network/interfaces.d/50-cloud-init.cfg
+  
+                  # Remove management NIC stanzas (eth0 for Kali, ens3 for Debian)
+                  sed -i '/allow-hotplug eth0/d' /etc/network/interfaces
+                  sed -i '/iface eth0 inet dhcp/d' /etc/network/interfaces
+                  sed -i '/auto eth0/d' /etc/network/interfaces
+                  sed -i '/allow-hotplug ens3/d' /etc/network/interfaces
+                  sed -i '/iface ens3 inet dhcp/d' /etc/network/interfaces
+                  sed -i '/auto ens3/d' /etc/network/interfaces
+  
+                  # Shift ethN names down by 1 using placeholder (only applies to ethX style naming)
+                  if grep -qP 'eth[1-9][0-9]*' /etc/network/interfaces; then
+                    for i in $(grep -oP 'eth\\K[1-9][0-9]*' /etc/network/interfaces | sort -rn | uniq); do
+                      new=$((i - 1))
+                      sed -i "s/eth${i}/ETH_PLACEHOLDER_${new}/g" /etc/network/interfaces
+                    done
+                    sed -i "s/ETH_PLACEHOLDER_/eth/g" /etc/network/interfaces
+                  fi
+  
+                # ensure the hostname is in /etc/hosts
+                if ! grep -q "$(hostname)" /etc/hosts; then
+                  echo "127.0.1.1 $(hostname)" >> /etc/hosts
                 fi
+  
+              SHELL
 
-              # ensure the hostname is in /etc/hosts
-              if ! grep -q "$(hostname)" /etc/hosts; then
-                echo "127.0.1.1 $(hostname)" >> /etc/hosts
-              fi
-
-            SHELL
-
-            machine.communicate.sudo(fix_script)
+              machine.communicate.sudo(fix_script)
+            end
 
             env[:ui].info I18n.t('vagrant_proxmox.done')
           end
@@ -269,18 +286,34 @@ module VagrantPlugins
           SHELL
         end
 
-        def windows_ip_script(nic_index, ip, netmask)
-          cidr = cidr_from_netmask(netmask)
+        def windows_ip_script(nic_index, ip, netmask, mac)
+          mac_windows = mac.upcase
           <<~PS1
-            $adapters = Get-NetAdapter | Where-Object { $_.InterfaceDescription -notlike '*Loopback*' } | Sort-Object -Property InterfaceIndex
-            if ($adapters.Count -le #{nic_index}) { Write-Error "No NIC at index #{nic_index}"; exit 1 }
-            $adapter = $adapters[#{nic_index}]
-            Write-Host "Configuring $($adapter.Name) with #{ip}"
-            $adapter | Remove-NetIPAddress -Confirm:$false -ErrorAction SilentlyContinue
-            New-NetIPAddress -InterfaceAlias $adapter.Name -IPAddress "#{ip}" -PrefixLength #{cidr} -ErrorAction Stop
-            Set-NetIPInterface -InterfaceAlias $adapter.Name -Dhcp Disabled
-          PS1
+    $mac = '#{mac_windows}'
+    $adapter = Get-WmiObject Win32_NetworkAdapter | Where-Object { $_.MACAddress -eq $mac }
+    if ($adapter -eq $null) { Write-Error "No adapter with MAC #{mac_windows}"; exit 1 }
+    $name = $adapter.NetConnectionID
+    $command = "netsh interface ip set address name=`"$name`" static #{ip} #{netmask}"
+    Write-Host "Scheduling $name to be configured with #{ip} on next boot"
+    New-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\RunOnce' -Name "SetStaticIP_#{nic_index}" -Value $command -PropertyType String -Force
+  PS1
         end
+
+
+
+
+        # def windows_ip_script(nic_index, ip, netmask)
+          # cidr = cidr_from_netmask(netmask)
+          # <<~PS1
+          #   $adapters = Get-NetAdapter | Where-Object { $_.InterfaceDescription -notlike '*Loopback*' } | Sort-Object -Property InterfaceIndex
+          #   if ($adapters.Count -le #{nic_index}) { Write-Error "No NIC at index #{nic_index}"; exit 1 }
+          #   $adapter = $adapters[#{nic_index}]
+          #   Write-Host "Configuring $($adapter.Name) with #{ip}"
+          #   $adapter | Remove-NetIPAddress -Confirm:$false -ErrorAction SilentlyContinue
+          #   New-NetIPAddress -InterfaceAlias $adapter.Name -IPAddress "#{ip}" -PrefixLength #{cidr} -ErrorAction Stop
+          #   Set-NetIPInterface -InterfaceAlias $adapter.Name -Dhcp Disabled
+          # PS1
+        # end
 
         def cidr_from_netmask(netmask)
           netmask.split('.').map { |o| o.to_i.to_s(2).count('1') }.sum
