@@ -323,14 +323,12 @@ module VagrantPlugins
     $mac = '#{mac_windows}'
     $adapter = Get-WmiObject Win32_NetworkAdapter | Where-Object { $_.MACAddress -eq $mac }
     if ($adapter -eq $null) { Write-Host "No adapter found with MAC #{mac_windows}, skipping"; exit 0 }
-    $name  = $adapter.NetConnectionID
-    $index = $adapter.InterfaceIndex
-    $command = 'netsh interface ip set address index=' + $index + ' static #{ip} #{netmask}'
-    Write-Host "Scheduling index $index ($name) to be configured with #{ip} on next boot (Server 2016+)"
-    New-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\RunOnce' -Name "SetStaticIP_#{nic_index}" -Value $command -PropertyType String -Force
+    $name = $adapter.NetConnectionID
+    Write-Host "Scheduling $name to be configured with #{ip} on next boot (Server 2016+)"
+    New-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\RunOnce' -Name "SetStaticIP_#{nic_index}" -Value "netsh interface ip set address name=`"$name`" static #{ip} #{netmask}" -PropertyType String -Force
+    Write-Host "RunOnce value stored"
   PS1
         end
-
 
 
 
