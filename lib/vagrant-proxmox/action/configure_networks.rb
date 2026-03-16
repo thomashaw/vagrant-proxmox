@@ -168,6 +168,7 @@ module VagrantPlugins
 
           machine = env[:machine]
           is_windows = machine.config.vm.guest == :windows
+          is_win7 = is_win7 = machine.config.vm.box.to_s.downcase.start_with?('win7')
           static_nets = networks.reject { |net| net[:dhcp] }
 
           unless static_nets.empty?
@@ -187,9 +188,11 @@ module VagrantPlugins
               nic_idx = arr_idx + 1
               if is_windows
                 unless net[:dhcp]
-                  script = windows_ip_script(nic_idx, net[:ip], net[:netmask], net[:macaddress])
+                  script = windows_ip_script(nic_idx, net[:ip], net[:netmask], net[:macaddress], is_win7)
                   env[:ui].detail "  Configuring Windows NIC #{nic_idx}: #{net[:ip]}"
-                  machine.communicate.sudo(script)
+                  machine.communicate.sudo(script) do |type, data|
+                    env[:ui].detail "  [#{type}] #{data.chomp}" unless data.strip.empty?
+                  end
                 end
               else
                 if net[:dhcp]
@@ -286,7 +289,16 @@ module VagrantPlugins
           SHELL
         end
 
-        def windows_ip_script(nic_index, ip, netmask, mac)
+        def windows_ip_script(nic_index, ip, netmask, mac, is_win7)
+          if is_win7
+            windows_ip_script_win7(nic_index, ip, netmask, mac)
+          else
+            windows_ip_script_server(nic_index, ip, netmask, mac)
+          end
+        end
+
+
+        def windows_ip_script_win7(nic_index, ip, netmask, mac)
           mac_windows = mac.upcase
           <<~PS1
     $mac = '#{mac_windows}'
@@ -294,7 +306,22 @@ module VagrantPlugins
     if ($adapter -eq $null) { Write-Error "No adapter with MAC #{mac_windows}"; exit 1 }
     $name = $adapter.NetConnectionID
     $command = "netsh interface ip set address name=`"$name`" static #{ip} #{netmask}"
-    Write-Host "Scheduling $name to be configured with #{ip} on next boot"
+  PS1
+        end
+
+
+        def windows_ip_script_server(nic_index, ip, netmask, mac)
+          mac_windows = mac.upcase
+          <<~PS1
+    $allAdapters = Get-WmiObject Win32_NetworkAdapter | Where-Object { $_.MACAddress -ne $null }
+    foreach ($a in $allAdapters) { Write-Host "Adapter: $($a.NetConnectionID) MAC: $($a.MACAddress)" }
+    $mac = '#{mac_windows}'
+    $adapter = Get-WmiObject Win32_NetworkAdapter | Where-Object { $_.MACAddress -eq $mac }
+    if ($adapter -eq $null) { Write-Host "No adapter found with MAC #{mac_windows}, skipping"; exit 0 }
+    $name  = $adapter.NetConnectionID
+    $index = $adapter.InterfaceIndex
+    $command = 'netsh interface ip set address index=' + $index + ' static #{ip} #{netmask}'
+    Write-Host "Scheduling index $index ($name) to be configured with #{ip} on next boot (Server 2016+)"
     New-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\RunOnce' -Name "SetStaticIP_#{nic_index}" -Value $command -PropertyType String -Force
   PS1
         end
