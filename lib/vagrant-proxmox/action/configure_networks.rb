@@ -168,7 +168,7 @@ module VagrantPlugins
 
           machine = env[:machine]
           is_windows = machine.config.vm.guest == :windows
-          is_win7 = is_win7 = machine.config.vm.box.to_s.downcase.start_with?('win7')
+          is_win7 = machine.provider_config.qemu_template.to_s.downcase.start_with?('win7')
           static_nets = networks.reject { |net| net[:dhcp] }
 
           unless static_nets.empty?
