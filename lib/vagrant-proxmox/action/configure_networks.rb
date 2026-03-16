@@ -301,13 +301,18 @@ module VagrantPlugins
         def windows_ip_script_win7(nic_index, ip, netmask, mac)
           mac_windows = mac.upcase
           <<~PS1
+    $allAdapters = Get-WmiObject Win32_NetworkAdapter | Where-Object { $_.MACAddress -ne $null }
+    foreach ($a in $allAdapters) { Write-Host "Adapter: $($a.NetConnectionID) MAC: $($a.MACAddress)" }
     $mac = '#{mac_windows}'
     $adapter = Get-WmiObject Win32_NetworkAdapter | Where-Object { $_.MACAddress -eq $mac }
-    if ($adapter -eq $null) { Write-Error "No adapter with MAC #{mac_windows}"; exit 1 }
+    if ($adapter -eq $null) { Write-Host "No adapter found with MAC #{mac_windows}, skipping"; exit 0 }
     $name = $adapter.NetConnectionID
+    Write-Host "Scheduling $name to be configured with #{ip} on next boot (Win7)"
     $command = "netsh interface ip set address name=`"$name`" static #{ip} #{netmask}"
+    New-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\RunOnce' -Name "SetStaticIP_#{nic_index}" -Value $command -PropertyType String -Force
   PS1
         end
+
 
 
         def windows_ip_script_server(nic_index, ip, netmask, mac)
